@@ -128,7 +128,7 @@ Create a new Web Service → Connect backend repo.
 
 Add environment variables:
 
-MONGO_URI=your_mongodb_connection_string
+MONGO_URI=mongodb+srv://adarsh:mypassword****@product-transparency.c0dync2.mongodb.net/product?retryWrites=true&w=majority&appName=product-transparency
 
 PORT=8000
 
