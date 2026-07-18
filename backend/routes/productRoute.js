@@ -1,17 +1,19 @@
 import express from 'express';
-import Product from '../models/Product.js';
 import dotenv from 'dotenv';
-import axios from 'axios';
 dotenv.config();
+import Product from '../models/Product.js';
+import { GoogleGenAI } from "@google/genai";
 
 const router = express.Router();
 
+// Initialize Gemini client ONCE (reused across requests)
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
 // ---------------------------
-// GET /api/products - MISSING ROUTE ADDED!
+// GET /api/products
 // ---------------------------
 router.get('/', async (req, res) => {
   try {
-    // Get all products, sorted by most recent first
     const products = await Product.find().sort({ createdAt: -1 });
     res.json(products);
   } catch (err) {
@@ -49,8 +51,27 @@ router.post('/basic', async (req, res) => {
     return res.status(400).json({ error: 'Product name and category are required' });
   }
 
-  try {
-    const prompt = `
+  // JSON schema the model MUST follow (structured output = no markdown, no parse errors)
+  const questionsSchema = {
+    type: "object",
+    properties: {
+      questions: {
+        type: "array",
+        minItems: 8,
+        maxItems: 8,
+        items: {
+          type: "object",
+          properties: {
+            question: { type: "string" }
+          },
+          required: ["question"]
+        }
+      }
+    },
+    required: ["questions"]
+  };
+
+  const prompt = `
 You are a product expert.
 
 Product Name: ${productName}
@@ -64,95 +85,64 @@ Rules:
 - Questions should help collect detailed product information.
 - Avoid asking about price, shipping, return policy or customer support.
 - Every question should be different.
-- Return ONLY valid JSON.
-
-JSON format:
-
-[
-  {
-    "question": "..."
-  }
-]
 `;
-    const response = await axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${process.env.GEMINI_API_KEY}`,
-      {
-        contents: [{
-          parts: [{ text: prompt }]
-        }],
-        generationConfig: { maxOutputTokens: 500, temperature: 0.7 }
-      },
-      { headers: { 'Content-Type': 'application/json' } }
-    );
 
-    let questionsRaw = response.data.candidates[0].content.parts[0].text.trim();
+  let questionsArray = [];
+  let usedAI = false;
 
-    // Remove any markdown formatting
-    if (questionsRaw.startsWith('```json')) {
-      questionsRaw = questionsRaw.replace(/```json\n?/, '').replace(/\n?```$/, '');
-    } else if (questionsRaw.startsWith('```')) {
-      questionsRaw = questionsRaw.replace(/```\n?/, '').replace(/\n?```$/, '');
+  try {
+    const interaction = await ai.interactions.create({
+      model: "gemini-3.5-flash",
+      input: prompt,
+      response_format: {
+        type: "text",
+        mime_type: "application/json",
+        schema: questionsSchema
+      }
+    });
+
+    // Log raw output while debugging — remove/comment out once confirmed working
+    console.log('RAW AI RESPONSE:', interaction.output_text);
+
+    const parsed = JSON.parse(interaction.output_text);
+
+    if (Array.isArray(parsed.questions) && parsed.questions.length > 0) {
+      questionsArray = parsed.questions.map(q => ({ question: q.question, answer: '' }));
+      usedAI = true;
+    } else {
+      throw new Error('AI response did not contain a valid questions array');
     }
+  } catch (aiError) {
+    console.error('Gemini API error, using fallback questions:', aiError.message);
+    const fallbackQuestions = getFallbackQuestions(category);
+    questionsArray = fallbackQuestions.map(q => ({ question: q, answer: '' }));
+  }
 
-    // Parse JSON safely
-    let questionsArray = [];
-    try {
-      const parsed = JSON.parse(questionsRaw);
-      if (Array.isArray(parsed)) {
-        questionsArray = parsed.map(q => ({ question: q.question || q, answer: '' }));
-      } else throw new Error('Response is not an array');
-    } catch (parseError) {
-      console.warn('AI returned invalid JSON, using fallback questions...');
-      const fallbackQuestions = getFallbackQuestions(category);
-      questionsArray = fallbackQuestions.map(q => ({ question: q, answer: '' }));
-    }
+  // Ensure exactly 8 questions no matter what
+  if (questionsArray.length < 8) {
+    const additionalQuestions = getAdditionalQuestions(category, 8 - questionsArray.length);
+    questionsArray = [...questionsArray, ...additionalQuestions.map(q => ({ question: q, answer: '' }))];
+  } else if (questionsArray.length > 8) {
+    questionsArray = questionsArray.slice(0, 8);
+  }
 
-    // Ensure exactly 8 questions
-    if (questionsArray.length < 8) {
-      const additionalQuestions = getAdditionalQuestions(category, 8 - questionsArray.length);
-      questionsArray = [...questionsArray, ...additionalQuestions.map(q => ({ question: q, answer: '' }))];
-    } else if (questionsArray.length > 8) {
-      questionsArray = questionsArray.slice(0, 8);
-    }
-
-    // Save to MongoDB with default status
+  try {
     const product = new Product({
       productName,
       category,
       questions: questionsArray,
-      status: "Active" // default status
+      status: "Active"
     });
 
     await product.save();
-    res.status(201).json(product);
 
-  } catch (err) {
-    console.error('Backend error:', err.response ? err.response.data : err.message);
-
-    // Fallback: create product with default questions if API fails
-    try {
-      const fallbackQuestions = getFallbackQuestions(category);
-      const questionsArray = fallbackQuestions.map(q => ({ question: q, answer: '' }));
-
-      const product = new Product({
-        productName,
-        category,
-        questions: questionsArray,
-        status: "Active"
-      });
-
-      await product.save();
-
-      res.status(201).json({
-        ...product.toObject(),
-        warning: 'Created with fallback questions due to AI service unavailability'
-      });
-    } catch (fallbackError) {
-      res.status(500).json({
-        error: 'Server error',
-        details: err.response ? err.response.data : err.message,
-      });
-    }
+    res.status(201).json({
+      ...product.toObject(),
+      ...(usedAI ? {} : { warning: 'Created with fallback questions due to AI service unavailability' })
+    });
+  } catch (dbError) {
+    console.error('Database error:', dbError.message);
+    res.status(500).json({ error: 'Server error', details: dbError.message });
   }
 });
 
@@ -201,19 +191,17 @@ router.put("/:id", async (req, res) => {
 });
 
 // ---------------------------
-// GET /api/products/:id/pdf - PDF Download Route
+// GET /api/products/:id/pdf
 // ---------------------------
 router.get('/:id/pdf', async (req, res) => {
   try {
     const product = await Product.findById(req.params.id);
     if (!product) return res.status(404).json({ error: 'Product not found' });
 
-    // For now, redirect to a PDF generation service or return a simple response
-    // You'll need to implement actual PDF generation here
-    res.json({ 
-      message: 'PDF generation not implemented yet', 
+    res.json({
+      message: 'PDF generation not implemented yet',
       productName: product.productName,
-      downloadUrl: '#' 
+      downloadUrl: '#'
     });
   } catch (err) {
     res.status(500).json({ error: 'Server error generating PDF' });
