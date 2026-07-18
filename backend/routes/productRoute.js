@@ -51,24 +51,18 @@ router.post('/basic', async (req, res) => {
     return res.status(400).json({ error: 'Product name and category are required' });
   }
 
-  // JSON schema the model MUST follow (structured output = no markdown, no parse errors)
+  // Gemini structured-output schema uses OpenAPI-style uppercase types
   const questionsSchema = {
-    type: "object",
-    properties: {
-      questions: {
-        type: "array",
-        minItems: 8,
-        maxItems: 8,
-        items: {
-          type: "object",
-          properties: {
-            question: { type: "string" }
-          },
-          required: ["question"]
-        }
-      }
-    },
-    required: ["questions"]
+    type: "ARRAY",
+    minItems: 8,
+    maxItems: 8,
+    items: {
+      type: "OBJECT",
+      properties: {
+        question: { type: "STRING" }
+      },
+      required: ["question"]
+    }
   };
 
   const prompt = `
@@ -91,23 +85,22 @@ Rules:
   let usedAI = false;
 
   try {
-    const interaction = await ai.interactions.create({
-      model: "gemini-3.5-flash",
-      input: prompt,
-      response_format: {
-        type: "text",
-        mime_type: "application/json",
-        schema: questionsSchema
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: questionsSchema
       }
     });
 
     // Log raw output while debugging — remove/comment out once confirmed working
-    console.log('RAW AI RESPONSE:', interaction.output_text);
+    console.log('RAW AI RESPONSE:', response.text);
 
-    const parsed = JSON.parse(interaction.output_text);
+    const parsed = JSON.parse(response.text);
 
-    if (Array.isArray(parsed.questions) && parsed.questions.length > 0) {
-      questionsArray = parsed.questions.map(q => ({ question: q.question, answer: '' }));
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      questionsArray = parsed.map(q => ({ question: q.question, answer: '' }));
       usedAI = true;
     } else {
       throw new Error('AI response did not contain a valid questions array');
