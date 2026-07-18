@@ -50,20 +50,30 @@ router.post('/basic', async (req, res) => {
   }
 
   try {
-    const prompt = `Generate 8 unique, clear, and specific questions that a customer might ask about a product. 
-The product details are:
-- Name: "${productName}"
-- Category: "${category}"
+    const prompt = `
+You are a product expert.
 
-Format the output as a JSON array of objects, each object containing a "question" field.
-Only output valid JSON without any additional text or formatting.
+Product Name: ${productName}
+Category: ${category}
 
-Example format:
+Generate exactly 8 questions.
+
+Rules:
+- If the product name refers to a specific product (for example Acer Aspire 7, iPhone 15, Samsung Galaxy S24), generate questions specific to that product.
+- Do NOT generate generic questions.
+- Questions should help collect detailed product information.
+- Avoid asking about price, shipping, return policy or customer support.
+- Every question should be different.
+- Return ONLY valid JSON.
+
+JSON format:
+
 [
-  {"question": "What are the dimensions of this product?"},
-  {"question": "What materials is it made from?"}
-]`;
-
+  {
+    "question": "..."
+  }
+]
+`;
     const response = await axios.post(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
